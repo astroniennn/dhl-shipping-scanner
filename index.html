@@ -116,18 +116,24 @@
       <div class="flex flex-col md:flex-row gap-4">
         
           <!-- Scan / Camera Input -->
-          <div class="flex-1 border-2 border-dashed border-gray-300 rounded p-6 text-center hover:bg-gray-50 transition cursor-pointer relative" onclick="document.getElementById('file-input').click()">
-            <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleImageUpload(event)">
-            <div class="text-4xl mb-2">📸</div>
-            <p class="font-bold text-gray-700">แตะเพื่อถ่ายรูป / เลือกรูป</p>
-            <p class="text-sm text-gray-500">ใบปะหน้า DHL</p>
-          
-          <!-- Loading Overlay -->
-          <div id="loading-overlay" class="absolute inset-0 bg-white/80 hidden flex-col items-center justify-center rounded">
-            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
-            <p class="text-sm font-bold text-blue-600">กำลังอ่านข้อมูล...</p>
+          <div class="flex-1 flex flex-col gap-2 relative">
+            <div class="flex-1 border-2 border-solid border-blue-400 bg-blue-50 rounded p-4 text-center hover:bg-blue-100 transition cursor-pointer flex flex-col justify-center items-center" onclick="openCameraModal()">
+              <div class="text-3xl mb-1">🎥</div>
+              <p class="font-bold text-blue-700">สแกนสด (Live Camera)</p>
+              <p class="text-xs text-blue-600">ให้ตัวอักษรลอยขึ้นมาบนจอ</p>
+            </div>
+            <div class="border-2 border-dashed border-gray-300 rounded p-3 text-center hover:bg-gray-50 transition cursor-pointer" onclick="document.getElementById('file-input').click()">
+              <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleImageUpload(event)">
+              <div class="text-xl inline-block mr-2">🖼️</div>
+              <span class="font-bold text-gray-700 text-sm">แตะเพื่อเลือกรูปภาพจากเครื่อง</span>
+            </div>
+            
+            <!-- Loading Overlay shared -->
+            <div id="loading-overlay" class="absolute inset-0 bg-white/90 hidden flex-col items-center justify-center rounded z-10">
+              <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
+              <p class="text-sm font-bold text-blue-600">กำลังอ่านข้อมูล...</p>
+            </div>
           </div>
-        </div>
 
         <!-- Manual Add -->
         <div class="flex-1 bg-gray-50 rounded p-4 border border-gray-200">
@@ -185,6 +191,36 @@
         <div class="flex gap-2">
           <button onclick="closeModal()" class="flex-1 py-3 rounded border border-gray-300 hover:bg-gray-100 text-gray-700">ยกเลิก</button>
           <button onclick="confirmAdd()" class="flex-1 py-3 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold">✅ ยืนยันเพิ่ม</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Camera Modal -->
+    <div id="camera-modal" class="fixed inset-0 bg-black z-50 hidden flex-col">
+      <div class="p-4 flex justify-between items-center bg-black/50 absolute top-0 left-0 right-0 z-20">
+        <h3 class="text-white font-bold">🎥 สแกนสด (Live OCR)</h3>
+        <button onclick="closeCameraModal()" class="text-white text-3xl font-bold p-2">&times;</button>
+      </div>
+      
+      <div class="relative flex-1 overflow-hidden">
+        <!-- Live Video -->
+        <video id="live-video" class="absolute inset-0 w-full h-full object-cover" autoplay playsinline></video>
+        
+        <!-- OCR Floating Text Overlay -->
+        <div id="live-ocr-overlay" class="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-4 z-10">
+           <!-- Crosshair/Guide -->
+           <div class="w-64 h-32 border-2 border-dashed border-yellow-400/70 rounded-lg mb-4 flex items-center justify-center relative shadow-[0_0_0_9999px_rgba(0,0,0,0.4)]">
+              <span class="text-yellow-400/50 text-xs text-center drop-shadow-md">จัด PHYID ให้อยู่ในกรอบ<br>(ถือกล้องแนวนอนหรือแนวตั้งก็ได้)</span>
+           </div>
+
+           <!-- Dynamic floating text goes here -->
+           <div id="floating-text" class="text-yellow-300 font-mono text-xl whitespace-pre-wrap bg-black/60 p-4 rounded-lg hidden shadow-lg w-full text-center max-h-[40vh] overflow-hidden break-words backdrop-blur-sm border border-yellow-500/30"></div>
+        </div>
+
+        <div class="absolute bottom-12 left-0 right-0 text-center z-20 pointer-events-none">
+          <p class="bg-black/60 text-white inline-block px-4 py-2 rounded-full text-sm backdrop-blur-md shadow">
+            รอสักครู่... ข้อความจะลอยขึ้นมาบนจอ
+          </p>
         </div>
       </div>
     </div>
@@ -555,6 +591,127 @@
     }
 
     // --- OCR Logic ---
+    let tesseractWorker = null;
+    let isLiveScanning = false;
+    let liveCameraStream = null;
+    let fallbackTimer = null;
+
+    async function getTesseractWorker() {
+      if (!tesseractWorker) {
+        // Init worker once
+        tesseractWorker = await Tesseract.createWorker('eng');
+      }
+      return tesseractWorker;
+    }
+
+    // -- Live Camera Logic --
+    async function openCameraModal() {
+      const modal = document.getElementById('camera-modal');
+      const video = document.getElementById('live-video');
+      const floatingText = document.getElementById('floating-text');
+      const statusText = document.querySelector('#live-ocr-overlay').nextElementSibling.querySelector('p');
+      
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      floatingText.classList.add('hidden');
+      floatingText.innerText = "";
+      floatingText.classList.remove('text-green-400', 'font-bold', 'text-2xl');
+      floatingText.classList.add('text-yellow-300', 'text-xl');
+      statusText.innerText = "กำลังโหลดโมเดล OCR...";
+      
+      try {
+        await getTesseractWorker(); // Pre-warm worker
+        
+        liveCameraStream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: 'environment' } 
+        });
+        video.srcObject = liveCameraStream;
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        isLiveScanning = true;
+        statusText.innerText = "กำลังสแกน... กรุณาถือกล้องให้นิ่ง";
+        
+        const scanFrame = async () => {
+          if (!isLiveScanning) return;
+          
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            const imageData = canvas.toDataURL('image/jpeg', 0.5); // Downsample for speed
+            
+            try {
+               const worker = await getTesseractWorker();
+               const ret = await worker.recognize(imageData);
+               const text = ret.data.text;
+               
+               if (text.trim().length > 0) {
+                 floatingText.classList.remove('hidden');
+                 
+                 // Show floating text
+                 const shortText = text.split('\n').filter(l => l.trim().length > 0).slice(-8).join('\n');
+                 floatingText.innerText = shortText;
+                 
+                 // Check if valid code
+                 const parsed = parseDHLText(text);
+                 if (parsed) {
+                    floatingText.classList.remove('text-yellow-300', 'text-xl');
+                    floatingText.classList.add('text-green-400', 'font-bold', 'text-2xl');
+                    floatingText.innerHTML = "✅ พบข้อมูล!<br>" + parsed.phyid + " -> " + parsed.to;
+                    statusText.innerText = "🎉 สแกนสำเร็จ!";
+                    
+                    isLiveScanning = false;
+                    setTimeout(() => {
+                        closeCameraModal();
+                        document.getElementById('scan-status').innerHTML = "👀 พบข้อมูลจากกล้อง! กรุณาตรวจสอบก่อนเพิ่ม";
+                        document.getElementById('scan-result').classList.remove('hidden');
+                        document.getElementById('scan-result').className = "mt-4 p-4 rounded bg-blue-50 border border-blue-200 text-blue-800";
+                        showConfirmModal(parsed.phyid, parsed.to, parsed.qty);
+                    }, 1500);
+                    return;
+                 }
+               }
+            } catch (err) {
+               console.error("Live OCR Error:", err);
+            }
+          }
+          
+          // Re-queue frame capture
+          if (isLiveScanning) {
+             // Delay to prevent freezing the UI (tesseract takes CPU)
+             fallbackTimer = setTimeout(scanFrame, 800);
+          }
+        };
+        
+        video.onloadedmetadata = () => {
+           scanFrame();
+        };
+
+      } catch (err) {
+        console.error(err);
+        alert('ไม่สามารถเปิดใช้งานกล้องได้: ' + err.message);
+        closeCameraModal();
+      }
+    }
+
+    function closeCameraModal() {
+      isLiveScanning = false;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      
+      const modal = document.getElementById('camera-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      
+      if (liveCameraStream) {
+        liveCameraStream.getTracks().forEach(track => track.stop());
+        liveCameraStream = null;
+      }
+      document.getElementById('live-video').srcObject = null;
+    }
+
     function toggleDetails() {
       document.getElementById('scan-details').classList.toggle('hidden');
     }
@@ -573,14 +730,12 @@
       resultBox.classList.add('hidden'); // Hide until finished
 
       try {
-        const worker = await Tesseract.createWorker('eng'); // English is usually enough for codes
+        const worker = await getTesseractWorker();
         const ret = await worker.recognize(file);
         const text = ret.data.text;
         
         console.log("OCR Result:", text);
         detailsText.innerText = "ข้อความดิบที่อ่านได้:\n" + text;
-        
-        await worker.terminate();
 
         // Parse Logic
         const parsed = parseDHLText(text);
